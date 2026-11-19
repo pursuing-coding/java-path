@@ -216,7 +216,7 @@ test("normalizes corrupt stored progress before rendering", async ({ page }) => 
   await expect(page.locator(".level-item").nth(3)).toBeDisabled();
 });
 
-test("core UI panels open without layout overflow", async ({ page, browserName }) => {
+test("core UI panels open without layout overflow", async ({ page }) => {
   await expect.poll(() => hasHorizontalOverflow(page)).toBe(false);
 
   await page.locator("#showAnswer").click();
@@ -232,9 +232,7 @@ test("core UI panels open without layout overflow", async ({ page, browserName }
   await page.locator("#closeFocus").click();
   await expect(page.locator("#focusModal")).not.toHaveClass(/is-open/);
 
-  if (browserName === "chromium") {
-    await page.locator("#codeEditor").fill(passingHelloWorld);
-    await page.locator("#runCode").click();
-    await expect(page.locator("#consoleOutput")).toContainText("Smoke OK");
-  }
+  await page.locator("#codeEditor").fill(passingHelloWorld);
+  await page.locator("#runCode").click();
+  await expect(page.locator("#consoleOutput")).toContainText("Smoke OK");
 });

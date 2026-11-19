@@ -103,7 +103,8 @@ npm start
 
 ```powershell
 # 安装测试所需的浏览器内核
-npx playwright install chromium
+# 本地默认使用 WebKit，CI 同时验证 WebKit 和 Chromium。
+npx playwright install webkit
 
 # 执行验证任务 (检查关卡规范并运行 Playwright 冒烟测试)
 npm run verify
