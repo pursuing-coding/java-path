@@ -5,7 +5,6 @@
 [![GitHub Pages](https://img.shields.io/badge/pages-GitHub-blueviolet.svg)](https://pursuing-coding.github.io/java-path/)
 [![License](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 [![Node.js Version](https://img.shields.io/badge/node-%3E%3D20.0.0-brightgreen.svg)](https://nodejs.org/)
-[![Playwright Tests](https://img.shields.io/badge/tests-Playwright-orange.svg)](https://playwright.dev/)
 
 `java-path` 是一个开箱即用的 Java 学习工作台。它集成了**课程讲解**、**官方资料**、**学习路径**、**代码编辑器**、**标准输入 (stdin)**、**控制台输出**和**自动化提交验证**。全网共有 **13 个 Level、104 个关卡**，逐步引导学习者从 `Hello World` 迈向 `Spring Boot` 实战和高并发 JVM 原理。
 
@@ -68,11 +67,10 @@ java-path/
 │   └── validate-lessons.js  # 自动化校验关卡合法性、完整性及官方白名单链接
 │
 ├── tests/                   # 测试用例目录
-│   └── ui-smoke.spec.js     # 基于 Playwright 的端到端桌面与移动端 UI 冒烟测试
+│   └── native-ui.js     # 基于 Safari 的端到端桌面与移动端 UI 冒烟测试
 │
 ├── server.js                # 极简高性能 Node.js 后端服务器（健康检查、静态服务、Java 安全沙箱运行）
 ├── package.json             # 依赖管理及启动命令
-└── playwright.config.js     # Playwright 测试配置文件
 ```
 
 ---
@@ -103,10 +101,8 @@ npm start
 
 ```powershell
 # 安装测试所需的浏览器内核
-# 本地默认使用 WebKit，CI 同时验证 WebKit 和 Chromium。
-npx playwright install webkit
 
-# 执行验证任务 (检查关卡规范并运行 Playwright 冒烟测试)
+# 执行验证任务 (检查关卡规范并运行 Safari 冒烟测试)
 npm run verify
 ```
 
@@ -120,3 +116,5 @@ npm run verify
 2. **硬件额度限制**：严格限制用户代码进程的 CPU 使用率、运行内存（如最大 256MB）、磁盘写入权限及网络访问。
 3. **超时截断**：超过 `5s` 未执行完毕的进程自动触发 `SIGKILL` 强杀保护，以防死循环消耗服务器资源。
 4. **输出内容控制**：限制标准输出与标准错误的最大字符长度（如 `12,000` 字符），防止打印无限字符撑爆浏览器及传输通道。
+
+浏览器回归在 macOS 上使用系统 Safari，覆盖宽屏和窄屏布局。开启 Safari 开发者设置中的「允许远程自动化」后运行 `npm run verify`。
