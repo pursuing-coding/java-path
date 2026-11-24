@@ -2,15 +2,16 @@ import { after, beforeEach, describe, test as nodeTest } from "node:test";
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
 import http from "node:http";
-import { Builder, By } from "selenium-webdriver";
+import { Builder, By, Key } from "selenium-webdriver";
 import safari from "selenium-webdriver/safari.js";
 import { setTimeout as delay } from "node:timers/promises";
 
 export function suite(register) {
-  for (const width of [1440, 390]) describe(`Safari ${width}px`, () => {
+  for (const width of [1440, 1024, 390]) describe(`Safari ${width}px`, () => {
     let driver, service, origin, proxy, app, appUrl, run, confirm;
     const page = {
       evaluate: (fn, ...args) => driver.executeScript(fn, ...args),
+      press: key => driver.actions().sendKeys(Key[key]).perform(),
       reload: () => driver.navigate().refresh(),
       mockRun: handler => { run = handler; },
       confirm: handler => { confirm = handler; },
@@ -52,16 +53,26 @@ export function suite(register) {
         await check(async () => (await fetch(appUrl)).ok, true);
         proxy = http.createServer(async (req, res) => {
           try {
-            if (req.url === "/api/run" && run) {
+            if (req.method === "POST" && req.url === "/api/run" && run) {
               const body = [];
               for await (const chunk of req) body.push(chunk);
               res.setHeader("Content-Type", "application/json");
-              res.end(JSON.stringify(run(JSON.parse(Buffer.concat(body)))));
+              res.end(JSON.stringify(await run(JSON.parse(Buffer.concat(body)))));
               return;
             }
-            const target = await fetch(new URL(req.url, appUrl));
-            res.writeHead(target.status, {"Content-Type":target.headers.get("content-type") || "application/octet-stream"});
-            res.end(Buffer.from(await target.arrayBuffer()));
+            const request = http.request(new URL(req.url, appUrl), {
+              method: req.method,
+              headers: req.headers
+            }, (response) => {
+              res.writeHead(response.statusCode, response.headers);
+              response.pipe(res);
+            });
+            request.on("error", (error) => {
+              if (!res.headersSent) res.writeHead(502);
+              res.end(String(error));
+            });
+            res.on("close", () => request.destroy());
+            req.pipe(request);
           } catch (error) { res.writeHead(500); res.end(String(error)); }
         });
         await new Promise(resolve => proxy.listen(0, "127.0.0.1", resolve));

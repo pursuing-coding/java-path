@@ -5,9 +5,11 @@ import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { existsSync } from "node:fs";
 import { extname, isAbsolute, join, relative, resolve } from "node:path";
 import { tmpdir } from "node:os";
+import { fileURLToPath } from "node:url";
+import { runTeachingPreview } from "./public/teaching-preview.js";
 
 const port = Number(process.env.PORT || 4173);
-const publicDir = resolve("public");
+const publicDir = fileURLToPath(new URL("./public", import.meta.url));
 const maxCodeLength = 20_000;
 const maxOutputLength = 12_000;
 const runTimeoutMs = 5_000;
@@ -38,140 +40,38 @@ function sendText(response, statusCode, text, contentType = "text/plain; charset
   response.end(text);
 }
 
-function decodeJavaString(value) {
-  return value
-    .replaceAll('\\"', '"')
-    .replaceAll("\\n", "\n")
-    .replaceAll("\\t", "\t")
-    .replaceAll("\\r", "\r")
-    .replaceAll("\\\\", "\\");
-}
-
-function splitJavaConcat(expression) {
-  const parts = [];
-  let current = "";
-  let inString = false;
-  let escaping = false;
-
-  for (const char of expression) {
-    if (escaping) {
-      current += char;
-      escaping = false;
-      continue;
-    }
-
-    if (char === "\\") {
-      current += char;
-      escaping = true;
-      continue;
-    }
-
-    if (char === '"') {
-      current += char;
-      inString = !inString;
-      continue;
-    }
-
-    if (char === "+" && !inString) {
-      parts.push(current.trim());
-      current = "";
-      continue;
-    }
-
-    current += char;
-  }
-
-  parts.push(current.trim());
-  return parts;
-}
-
-function buildPreviewVariables(code) {
-  const variables = new Map();
-  const assignmentPattern = /\b(?:String|int|long|double|float|boolean|char)\s+([A-Za-z_$][\w$]*)\s*=\s*([^;]+);/g;
-  let match;
-
-  while ((match = assignmentPattern.exec(code)) !== null) {
-    const [, name, rawValue] = match;
-    const value = rawValue.trim();
-
-    if (/^"(?:\\.|[^"\\])*"$/.test(value)) {
-      variables.set(name, decodeJavaString(value.slice(1, -1)));
-    } else if (/^'(?:\\.|[^'\\])'$/.test(value)) {
-      variables.set(name, decodeJavaString(value.slice(1, -1)));
-    } else if (/^(true|false)$/.test(value)) {
-      variables.set(name, value);
-    } else if (/^-?\d+(?:\.\d+)?[dDfFlL]?$/.test(value)) {
-      variables.set(name, value.replace(/[dDfFlL]$/, ""));
-    }
-  }
-
-  return variables;
-}
-
-function evaluatePreviewExpression(expression, variables) {
-  const parts = splitJavaConcat(expression);
-  const output = [];
-
-  for (const part of parts) {
-    if (!part) continue;
-
-    if (/^"(?:\\.|[^"\\])*"$/.test(part)) {
-      output.push(decodeJavaString(part.slice(1, -1)));
-    } else if (/^'(?:\\.|[^'\\])'$/.test(part)) {
-      output.push(decodeJavaString(part.slice(1, -1)));
-    } else if (variables.has(part)) {
-      output.push(variables.get(part));
-    } else if (/^-?\d+(?:\.\d+)?[dDfFlL]?$/.test(part) || /^(true|false)$/.test(part)) {
-      output.push(part.replace(/[dDfFlL]$/, ""));
-    } else {
-      return null;
-    }
-  }
-
-  return output.join("");
-}
-
-function runTeachingPreview(code) {
-  const outputLines = [];
-  const variables = buildPreviewVariables(code);
-  const printPattern = /\b(?:System\.out\.println|IO\.println)\s*\(([\s\S]*?)\)\s*;/g;
-  let match;
-
-  while ((match = printPattern.exec(code)) !== null) {
-    const output = evaluatePreviewExpression(match[1], variables);
-    if (output !== null) outputLines.push(output);
-  }
-
-  if (outputLines.length > 0) {
-    return {
-      status: "learning-preview",
-      stdout: outputLines.join("\n"),
-      stderr: "Teaching preview: cloud JDK unavailable.",
-      durationMs: 0
-    };
-  }
-
-  return {
-    status: "preview-limited",
-    stdout: "",
-    stderr: 'Teaching preview: supports basic System.out.println("text").',
-    durationMs: 0
-  };
-}
-
 function readBody(request) {
   return new Promise((resolveBody, rejectBody) => {
-    let body = "";
+    const chunks = [];
+    let size = 0;
     request.on("data", (chunk) => {
-      body += chunk;
-      if (body.length > 64_000) {
-        request.destroy();
-        rejectBody(new Error("Request body is too large."));
+      if (size > 64_000) return;
+      size += chunk.length;
+      if (size > 64_000) {
+        const error = new Error("请求体超过 64000 字节。");
+        error.statusCode = 413;
+        rejectBody(error);
+        return;
+      }
+      chunks.push(chunk);
+    });
+    request.once("end", () => {
+      if (size > 64_000) return;
+      try {
+        resolveBody(new TextDecoder("utf-8", { fatal: true }).decode(Buffer.concat(chunks, size)));
+      } catch (error) {
+        rejectBody(error);
       }
     });
-    request.on("end", () => resolveBody(body));
-    request.on("error", rejectBody);
+    request.once("error", rejectBody);
+    request.once("aborted", () => rejectBody(new Error("请求已取消。")));
   });
+}
+
+function limitOutput(text) {
+  if (text.length <= maxOutputLength) return text;
+  const limited = text.slice(0, maxOutputLength);
+  return limited.replace(/[\uD800-\uDBFF]$/, "");
 }
 
 function runCommand(command, args, options = {}) {
@@ -186,77 +86,115 @@ function runCommand(command, args, options = {}) {
     let stdout = "";
     let stderr = "";
     let didTimeOut = false;
+    let stdoutLimitReached = false;
+    let stderrLimitReached = false;
     const timer = setTimeout(() => {
       didTimeOut = true;
       child.kill("SIGKILL");
     }, options.timeoutMs || runTimeoutMs);
+    const abort = () => child.kill("SIGKILL");
+    if (options.signal?.aborted) abort();
+    else options.signal?.addEventListener("abort", abort, { once: true });
+    const cleanup = () => {
+      clearTimeout(timer);
+      options.signal?.removeEventListener("abort", abort);
+    };
 
+    child.stdout.setEncoding("utf8");
+    child.stderr.setEncoding("utf8");
     child.stdout.on("data", (chunk) => {
-      stdout += chunk.toString();
-      if (stdout.length > maxOutputLength) child.kill("SIGKILL");
+      if (stdoutLimitReached) return;
+      if (stdout.length + chunk.length > maxOutputLength) {
+        stdoutLimitReached = true;
+        child.kill("SIGKILL");
+      }
+      stdout = limitOutput(stdout + chunk);
     });
     child.stderr.on("data", (chunk) => {
-      stderr += chunk.toString();
-      if (stderr.length > maxOutputLength) child.kill("SIGKILL");
+      if (stderrLimitReached) return;
+      if (stderr.length + chunk.length > maxOutputLength) {
+        stderrLimitReached = true;
+        child.kill("SIGKILL");
+      }
+      stderr = limitOutput(stderr + chunk);
     });
     child.on("error", (error) => {
-      clearTimeout(timer);
+      cleanup();
       resolveRun({ ok: false, missingCommand: error.code === "ENOENT", error, stdout, stderr });
     });
     child.on("close", (code) => {
-      clearTimeout(timer);
+      cleanup();
+      const didExceedOutput = stdoutLimitReached || stderrLimitReached;
       resolveRun({
-        ok: code === 0 && !didTimeOut,
+        ok: code === 0 && !didTimeOut && !didExceedOutput,
         code,
         didTimeOut,
+        didExceedOutput,
         stdout: stdout.slice(0, maxOutputLength),
         stderr: stderr.slice(0, maxOutputLength)
       });
     });
 
-    if (options.stdin) child.stdin.write(options.stdin);
-    child.stdin.end();
+    child.stdin.on("error", () => {
+      // Java can exit before it consumes the request input.
+    });
+    child.stdin.end(options.stdin);
   });
 }
 
-let cachedJavaStatus = null;
+let javaStatus;
+let javaStatusCheckedAt = 0;
+let checkingJava;
 
 async function getJavaStatus() {
-  if (cachedJavaStatus !== null) {
-    return cachedJavaStatus;
+  if (javaStatus && Date.now() - javaStatusCheckedAt < (javaStatus.available ? 60_000 : 5_000)) {
+    return javaStatus;
   }
 
-  const java = await runCommand("java", ["--version"], { timeoutMs: 2_000 });
-  if (java.missingCommand) {
-    cachedJavaStatus = {
-      available: false,
-      demoMode: true,
-      message: "Teaching preview enabled."
-    };
-    return cachedJavaStatus;
+  if (!checkingJava) {
+    checkingJava = runCommand("java", ["--version"], { timeoutMs: 4_000 }).then((java) => {
+      javaStatusCheckedAt = Date.now();
+      javaStatus = {
+        available: java.ok,
+        demoMode: !java.ok,
+        version: [java.stdout, java.stderr].filter(Boolean).join("\n").trim(),
+        message: java.ok ? "服务端 Java 运行环境可用。" : "未找到可用的 JDK，使用课程预览。"
+      };
+      return javaStatus;
+    }).finally(() => {
+      checkingJava = null;
+    });
   }
-
-  cachedJavaStatus = {
-    available: java.ok,
-    demoMode: false,
-    version: [java.stdout, java.stderr].filter(Boolean).join("\n").trim(),
-    message: java.ok ? "服务端 Java 运行环境可用。" : "检测到 java 命令，但版本检查未成功。"
-  };
-  return cachedJavaStatus;
+  return checkingJava;
 }
 
 async function handleRun(request, response) {
-  let payload;
-  try {
-    payload = JSON.parse(await readBody(request));
-  } catch {
-    sendJson(response, 400, { status: "error", stderr: "请求格式不是有效的 JSON。" });
+  if (request.headers["content-type"]?.split(";", 1)[0].trim().toLowerCase() !== "application/json") {
+    sendJson(response, 415, { status: "error", stderr: "请发送 application/json 请求。" });
     return;
   }
 
-  const code = String(payload.code || "");
-  const stdin = String(payload.stdin || "");
-  const args = Array.isArray(payload.args) ? payload.args.map(String).slice(0, 12) : [];
+  let payload;
+  try {
+    payload = JSON.parse(await readBody(request));
+  } catch (error) {
+    const statusCode = error.statusCode || 400;
+    sendJson(response, statusCode, {
+      status: "error",
+      stderr: statusCode === 413 ? error.message : "请求格式不是有效的 JSON。"
+    });
+    return;
+  }
+
+  if (!payload || typeof payload !== "object" || Array.isArray(payload) ||
+      typeof payload.code !== "string" || (payload.stdin !== undefined && typeof payload.stdin !== "string") ||
+      (payload.args !== undefined && !Array.isArray(payload.args))) {
+    sendJson(response, 400, { status: "error", stderr: "代码和输入必须是文本，命令行参数必须是列表。" });
+    return;
+  }
+
+  const { code, stdin = "" } = payload;
+  const args = (payload.args || []).slice(0, 12).map(String);
 
   if (!code.trim()) {
     sendJson(response, 400, { status: "error", stderr: "No code submitted." });
@@ -268,6 +206,7 @@ async function handleRun(request, response) {
   }
 
   const javaStatus = await getJavaStatus();
+  if (response.destroyed) return;
   if (!javaStatus.available) {
     sendJson(response, 200, runTeachingPreview(code));
     return;
@@ -275,6 +214,9 @@ async function handleRun(request, response) {
 
   const workDir = join(tmpdir(), `java-path-${randomUUID()}`);
   const startTime = Date.now();
+  const controller = new AbortController();
+  const abort = () => controller.abort();
+  response.once("close", abort);
   try {
     await mkdir(workDir, { recursive: true });
     await writeFile(join(workDir, "Main.java"), code, "utf8");
@@ -282,16 +224,29 @@ async function handleRun(request, response) {
     const result = await runCommand("java", ["Main.java", ...args], {
       cwd: workDir,
       stdin,
+      signal: controller.signal,
       timeoutMs: runTimeoutMs
     });
+    if (controller.signal.aborted) return;
+
+    let status = result.ok ? "success" : "compile-or-runtime-error";
+    let stderr = result.stderr || result.error?.message || "";
+    if (result.didExceedOutput) {
+      status = "output-limit";
+      stderr += "\n程序输出超过 " + maxOutputLength + " 字符，已停止。";
+    } else if (result.didTimeOut) {
+      status = "timeout";
+      stderr += "\n程序运行超过 " + runTimeoutMs / 1000 + " 秒，已停止。";
+    }
 
     sendJson(response, 200, {
-      status: result.didTimeOut ? "timeout" : result.ok ? "success" : "compile-or-runtime-error",
+      status,
       stdout: result.stdout,
-      stderr: result.didTimeOut ? `${result.stderr}\n程序运行超过 ${runTimeoutMs / 1000} 秒，已停止。` : result.stderr,
+      stderr,
       durationMs: Date.now() - startTime
     });
   } catch (error) {
+    if (controller.signal.aborted) return;
     sendJson(response, 500, {
       status: "server-error",
       stdout: "",
@@ -299,12 +254,14 @@ async function handleRun(request, response) {
       durationMs: Date.now() - startTime
     });
   } finally {
-    await rm(workDir, { recursive: true, force: true });
+    response.off("close", abort);
+    await rm(workDir, { recursive: true, force: true }).catch((error) => {
+      console.error("临时目录清理失败", error.message);
+    });
   }
 }
 
-async function serveStatic(request, response) {
-  const requestUrl = new URL(request.url, `http://${request.headers.host}`);
+async function serveStatic(requestUrl, response) {
   let rawPath;
   try {
     rawPath = decodeURIComponent(requestUrl.pathname === "/" ? "/index.html" : requestUrl.pathname);
@@ -338,16 +295,22 @@ async function serveStatic(request, response) {
 
 const server = createServer(async (request, response) => {
   try {
-    if (request.method === "GET" && request.url?.startsWith("/api/health")) {
+    const requestUrl = new URL(request.url, "http://127.0.0.1");
+    if (request.method === "GET" && requestUrl.pathname === "/api/health") {
       sendJson(response, 200, await getJavaStatus());
       return;
     }
-    if (request.method === "POST" && request.url?.startsWith("/api/run")) {
+    if (request.method === "POST" && requestUrl.pathname === "/api/run") {
+      const host = request.headers.host || "";
+      if (!/^(?:127\.0\.0\.1|localhost)(?::\d+)?$/i.test(host)) {
+        sendJson(response, 403, { status: "error", stderr: "Java 运行服务仅接受本机地址。" });
+        return;
+      }
       await handleRun(request, response);
       return;
     }
     if (request.method === "GET") {
-      await serveStatic(request, response);
+      await serveStatic(requestUrl, response);
       return;
     }
     sendText(response, 405, "Method not allowed");
@@ -356,6 +319,6 @@ const server = createServer(async (request, response) => {
   }
 });
 
-server.listen(port, () => {
-  console.log(`java-path is running at http://localhost:${port}`);
+server.listen(port, "127.0.0.1", () => {
+  console.log("java-path is running at http://127.0.0.1:" + server.address().port);
 });

@@ -201,6 +201,7 @@ CREATE TABLE enrollments (
   },
   {
     id: "level9-3-jdbc",
+    runInstruction: "请在本地项目中配置 JDBC 驱动和示例数据库，再执行本关查询。课程编辑器可检查查询和参数绑定。",
     title: "JDBC",
     subtitle: "Java 连接数据库",
     intro: [
@@ -342,6 +343,7 @@ public class Main {
   },
   {
     id: "level9-4-connection-pool",
+    runInstruction: "请在本地 Maven 或 Gradle 项目中添加 HikariCP 与 JDBC 驱动，配置示例数据库后验证连接池。",
     title: "连接池",
     subtitle: "复用数据库连接",
     intro: [
@@ -472,6 +474,7 @@ public class Main {
   },
   {
     id: "level9-5-transactions",
+    runInstruction: "请在配置好 JDBC 驱动、示例数据库和数据表的本地项目中验证提交和回滚。",
     title: "事务",
     subtitle: "提交、回滚、一致性",
     intro: [

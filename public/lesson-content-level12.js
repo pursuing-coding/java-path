@@ -1036,6 +1036,7 @@ public class Main {
   },
   {
     id: "level12-9-jfr-diagnostics",
+    runInstruction: "把代码保存为 Main.java，在本地终端执行 javac Main.java 和 java Main。程序打印 PID 后，在另一个终端执行诊断命令。",
     title: "JFR 与诊断工具",
     subtitle: "jcmd、jstack、jmap",
     intro: [
