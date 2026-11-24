@@ -137,12 +137,20 @@ suite(test => {
         };
     });
 
+    await page.evaluate(() => {
+      window.stdinEdits = [];
+      for (const id of ["stdinInput", "focusStdinInput"]) {
+        document.getElementById(id).addEventListener("input", (event) => {
+          if (event.isTrusted) window.stdinEdits.push(id);
+        });
+      }
+    });
     await page.locator("#codeEditor").fill(scannerEcho);
-    await page.locator("#stdinInput").fill("Alice\n18");
+    await page.locator("#stdinInput").type("Alice\n18");
     await page.locator("#runCode").click();
 
     await check(() => page.locator("#consoleOutput").text(), "stdin:Alice\n18", "contains");
-    assert.deepEqual(runRequests.at(-1).stdin, "Alice\n18");
+    assert.deepEqual(runRequests.at(-1), { code: scannerEcho, stdin: "Alice\n18" });
     await check(() => page.locator("#resetProgress").enabled(), true);
     const storedInputBeforeReload = await page.evaluate(() => localStorage.getItem("java-path-stdin-v1"));
     assert.equal(storedInputBeforeReload, null);
@@ -150,13 +158,14 @@ suite(test => {
     await page.locator("#focusCode").click();
     await check(() => page.locator("#focusStdinInput").value(), "Alice\n18");
 
-    await page.locator("#focusStdinInput").fill("Bob\n19");
+    await page.locator("#focusStdinInput").type("Bob\n19");
     await page.locator("#focusRun").click();
     await check(() => page.locator("#focusOutput").text(), "stdin:Bob\n19", "contains");
-    assert.deepEqual(runRequests.at(-1).stdin, "Bob\n19");
+    assert.deepEqual(runRequests.at(-1), { code: scannerEcho, stdin: "Bob\n19" });
 
     await page.locator("#closeFocus").click();
     await check(() => page.locator("#stdinInput").value(), "Bob\n19");
+    assert.deepEqual(await page.evaluate(() => [...new Set(window.stdinEdits)]), ["stdinInput", "focusStdinInput"]);
 
     await page.reload();
     await check(() => page.locator("#stdinInput").value(), "");
@@ -166,7 +175,7 @@ suite(test => {
 
   test("standard input alone does not enable reset", async ({ page }) => {
     await check(() => page.locator("#resetProgress").enabled(), false);
-    await page.locator("#stdinInput").fill("Only runtime input");
+    await page.locator("#stdinInput").type("Only runtime input");
     await check(() => page.locator("#resetProgress").enabled(), false);
 
     await page.locator("#clearStdin").click();

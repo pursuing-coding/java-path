@@ -12,7 +12,12 @@ export function suite(register) {
     const page = {
       evaluate: (fn, ...args) => driver.executeScript(fn, ...args),
       press: key => driver.actions().sendKeys(Key[key]).perform(),
-      reload: () => driver.navigate().refresh(),
+      async reload() {
+        await driver.navigate().refresh();
+        // A navigated document can expose the static controls before app.js
+        // has restored the lesson and attached the input and click handlers.
+        await check(() => page.evaluate(() => document.querySelector(".level-item.is-active") !== null), true);
+      },
       mockRun: handler => { run = handler; },
       confirm: handler => { confirm = handler; },
       locator(selector, index = 0) {
@@ -21,7 +26,18 @@ export function suite(register) {
         return {
           nth: i => page.locator(selector, i),
           async click() {
-            await (await element()).click();
+            const target = await element();
+            await driver.executeScript("arguments[0].scrollIntoView({block:'center', inline:'center', behavior:'instant'})", target);
+            // Wait for the real hit target to settle before sending a native click.
+            await check(() => driver.executeScript(function (node) {
+              const rect = node.getBoundingClientRect();
+              const left = Math.max(0, rect.left), right = Math.min(innerWidth, rect.right);
+              const top = Math.max(0, rect.top), bottom = Math.min(innerHeight, rect.bottom);
+              if (left >= right || top >= bottom) return false;
+              const hit = document.elementFromPoint((left + right) / 2, (top + bottom) / 2);
+              return node.contains(hit);
+            }, target), true);
+            await target.click();
             if (confirm) {
               const dialog = await driver.switchTo().alert();
               const handle = confirm; confirm = undefined;
@@ -29,8 +45,15 @@ export function suite(register) {
             }
           },
           async fill(text) {
+            // Seed exact multiline source fixtures without invoking editor auto-indent.
             const el = await element();
             await driver.executeScript("arguments[0].value = arguments[1]; arguments[0].dispatchEvent(new Event('input', {bubbles:true}));", el, text);
+          },
+          async type(text) {
+            const el = await element();
+            await el.clear();
+            const keys = text.split("\n").flatMap((line, i) => i ? [Key.RETURN, line] : [line]);
+            await el.sendKeys(...keys);
           },
           count: async () => (await elements()).length,
           value: async () => (await element()).getProperty("value"),
