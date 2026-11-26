@@ -2,6 +2,8 @@ import fs from "node:fs";
 import path from "node:path";
 import vm from "node:vm";
 import { fileURLToPath } from "node:url";
+import { gradeJavaLesson } from "../public/submission-grading.js";
+import { runTeachingPreview } from "../public/teaching-preview.js";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -144,6 +146,13 @@ for (const file of files) {
       throw new Error(`${key}[${index}] needs exampleCode and answerCode.`);
     }
 
+    if (!gradeJavaLesson(lesson, lesson.answerCode).ok) {
+      throw new Error(`${lesson.id} reference answer did not satisfy the grading rules.`);
+    }
+    if (gradeJavaLesson(lesson, lesson.starterCode).ok || gradeJavaLesson(lesson, "").ok) {
+      throw new Error(`${lesson.id} accepts unfinished work.`);
+    }
+
     lesson.sources.forEach((source, sourceIndex) => {
       if (!source.title || !source.url) {
         throw new Error(`${key}[${index}].sources[${sourceIndex}] needs title and url.`);
@@ -172,3 +181,66 @@ if (total !== expectedTotal) {
 }
 
 console.log(`Total authored lessons: ${total}`);
+
+const main = (body) => "class Main { public static void main(String[] args) { " + body + " } }";
+const forLoopLesson = context.window.LESSON_CONTENT_LEVEL2.find(({ id }) => id === "level2-for-loop");
+const forLoopAnswer = forLoopLesson.answerCode;
+const forLoopChecks = [
+  ["explicit addition", forLoopAnswer.replace("number += 2", "number = number + 2"), true],
+  ["commuted addition", forLoopAnswer.replace("number += 2", "number = 2 + number"), true],
+  ["commuted addition with wrong step", forLoopAnswer.replace("number += 2", "number = 3 + number"), false],
+  ["exclusive upper bound omits 10", forLoopAnswer.replace("number <= 10", "number < 10"), false],
+  ["equivalent exclusive bound", forLoopAnswer.replace("number <= 10", "number < 11"), true],
+  ["reversed inclusive bound", forLoopAnswer.replace("number <= 10", "10 >= number"), true],
+  ["reversed equivalent exclusive bound", forLoopAnswer.replace("number <= 10", "11 > number"), true],
+  ["reversed exclusive bound omits 10", forLoopAnswer.replace("number <= 10", "10 > number"), false],
+  ["reversed inclusive bound prints 12", forLoopAnswer.replace("number <= 10", "12 >= number"), false],
+  ["odd starting value", forLoopAnswer.replace("number = 2", "number = 1"), false],
+  ["incorrect printed value", forLoopAnswer.replace("println(number)", "println(number + 1)"), false],
+  ["print outside the loop", main("for (int i = 2; i <= 10; i += 2) {} System.out.println(10);"), false],
+  ["extra print after the expected sequence", main("for (int i = 2; 10 >= i; i = 2 + i) System.out.println(i); System.out.println(10);"), false],
+  ["reversed bound with commuted addition", main("for (int i = 2; 10 >= i; i = 2 + i) System.out.println(i);"), true],
+  ["counter redeclares main array parameter", forLoopAnswer.replace("String[] args", "String[] number"), false],
+  ["counter redeclares main varargs parameter", forLoopAnswer.replace("String[] args", "String... number"), false],
+  ["counter redeclares main parameter with trailing brackets", forLoopAnswer.replace("String[] args", "String number[]"), false],
+  ["main varargs with a distinct counter", forLoopAnswer.replace("String[] args", "String... values"), true],
+  ["main parameter with trailing brackets and a distinct counter", forLoopAnswer.replace("String[] args", "String values[]"), true],
+  ["filtering even numbers", main("for (int i = 1; i <= 10; i++) { if (i % 2 == 0) { System.out.println(i); } }"), true],
+  ["doubling the counter", main("for (int i = 1; i <= 5; ++i) System.out.println(i * 2);"), true]
+];
+const failedForLoopChecks = forLoopChecks.filter(([, source, expected]) => gradeJavaLesson(forLoopLesson, source).ok !== expected);
+if (failedForLoopChecks.length) {
+  throw new Error("Unexpected for-loop grades: " + failedForLoopChecks.map(([name]) => name).join(", "));
+}
+
+const previewChecks = [
+  [main('System.out.println(3 + 4);'), "7\n"],
+  [main('String name = "Ada"; System.out.println(name + ": " + 3 + 4);'), "Ada: 34\n"],
+  [main('int n = 2; System.out.println(n); n = 3;'), ""],
+  [main('if (true) System.out.println("hello"); else System.out.println("bye");'), ""],
+  [main('System.out.println("ok"); System.out.println(missing);'), ""]
+];
+for (const [source, expectedOutput] of previewChecks) {
+  const result = runTeachingPreview(source);
+  if (result.stdout !== expectedOutput || result.status !== (expectedOutput ? "learning-preview" : "preview-limited")) {
+    throw new Error("Unexpected teaching preview result for " + source);
+  }
+}
+
+const fullString = "a".repeat(6000);
+const previewLimitChecks = [
+  ["exact string and output limit", main(`String half = "${fullString}"; System.out.print(half + half);`), "learning-preview", fullString + fullString],
+  ["oversized concatenation before printing", main(`String half = "${fullString}"; String large = half + half + 1; System.out.println("small");`), "preview-limited", ""],
+  ["oversized literal before printing", main(`String large = "${fullString + fullString}a"; System.out.println("small");`), "preview-limited", ""],
+  ["newline exceeds output limit", main(`String half = "${fullString}"; System.out.println(half + half);`), "preview-limited", ""],
+  ["large source with small output", main(' '.repeat(20000) + 'System.out.println("small");'), "preview-limited", ""]
+];
+const failedPreviewLimits = previewLimitChecks.filter(([, source, status, stdout]) => {
+  const result = runTeachingPreview(source);
+  return result.status !== status || result.stdout !== stdout;
+});
+if (failedPreviewLimits.length) {
+  throw new Error("Unexpected preview limits: " + failedPreviewLimits.map(([name]) => name).join(", "));
+}
+
+console.log("Reference answers, starter templates, for-loop grading, and preview checks passed.");

@@ -1053,6 +1053,7 @@ public class Main {
   },
   {
     id: "level6-9-module-system",
+    runInstruction: "请按参考答案的文件路径保存各段代码，在本地 JDK 中编译模块并运行 Main。此页可核对模块声明和入口类。",
     title: "模块系统",
     subtitle: "module-info.java",
     intro: [

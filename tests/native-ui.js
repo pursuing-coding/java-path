@@ -4,7 +4,7 @@ import { suite, check } from "./safari.js";
 const passingHelloWorld =
   'public class Main {\n' +
   '    public static void main(String[] args) {\n' +
-  '        System.out.println("Smoke OK");\n' +
+  '        System.out.println("Hello, Java!");\n' +
   "    }\n" +
   "}";
 
@@ -33,6 +33,10 @@ suite(test => {
 
     await check(() => page.locator(".level-item").nth(2).attribute("title"), "完成前一关后解锁");
     await check(() => page.locator(".level-item").nth(2).attribute("aria-label"), /完成前一关后解锁/);
+
+    await page.locator("#submitTask").click();
+    await check(() => page.locator("#runMeta").text(), "task-needs-work");
+    await check(() => page.locator("#progressText").text(), "0/104 关");
 
     await page.locator("#codeEditor").fill(passingHelloWorld);
     await page.locator("#submitTask").click();
@@ -78,7 +82,7 @@ suite(test => {
     await page.locator("#nextLesson").click();
     await check(() => page.locator("#consoleOutput").text(), "Loaded: 2.", "contains");
     await check(() => page.locator("#nextLesson").visible(), false);
-    await check(() => page.locator("#codeEditor").value(), "");
+    await check(() => page.locator("#codeEditor").value(), /输出源码文件名/);
 
     await page.locator("#codeEditor").fill(secondLessonDraft);
     await page.locator(".level-item").nth(0).click();
@@ -94,7 +98,7 @@ suite(test => {
       await dialog.accept();
     });
     await page.locator("#resetProgress").click();
-    await check(() => page.locator("#codeEditor").value(), "");
+    await check(() => page.locator("#codeEditor").value(), /public class Main/);
     await check(() => page.locator("#progressText").text(), "0/104 关");
     await check(() => page.locator("#nextLesson").visible(), false);
     const draftsAfterReset = await page.evaluate(() => localStorage.getItem("java-path-drafts-v1"));
@@ -114,7 +118,7 @@ suite(test => {
     });
     await page.locator("#resetProgress").click();
 
-    await check(() => page.locator("#codeEditor").value(), "");
+    await check(() => page.locator("#codeEditor").value(), /public class Main/);
     await check(() => page.locator("#progressText").text(), "0/104 关");
     await check(() => page.locator("#resetProgress").enabled(), false);
     const draftsAfterReset = await page.evaluate(() => localStorage.getItem("java-path-drafts-v1"));
@@ -133,12 +137,20 @@ suite(test => {
         };
     });
 
+    await page.evaluate(() => {
+      window.stdinEdits = [];
+      for (const id of ["stdinInput", "focusStdinInput"]) {
+        document.getElementById(id).addEventListener("input", (event) => {
+          if (event.isTrusted) window.stdinEdits.push(id);
+        });
+      }
+    });
     await page.locator("#codeEditor").fill(scannerEcho);
-    await page.locator("#stdinInput").fill("Alice\n18");
+    await page.locator("#stdinInput").type("Alice\n18");
     await page.locator("#runCode").click();
 
     await check(() => page.locator("#consoleOutput").text(), "stdin:Alice\n18", "contains");
-    assert.deepEqual(runRequests.at(-1).stdin, "Alice\n18");
+    assert.deepEqual(runRequests.at(-1), { code: scannerEcho, stdin: "Alice\n18" });
     await check(() => page.locator("#resetProgress").enabled(), true);
     const storedInputBeforeReload = await page.evaluate(() => localStorage.getItem("java-path-stdin-v1"));
     assert.equal(storedInputBeforeReload, null);
@@ -146,13 +158,14 @@ suite(test => {
     await page.locator("#focusCode").click();
     await check(() => page.locator("#focusStdinInput").value(), "Alice\n18");
 
-    await page.locator("#focusStdinInput").fill("Bob\n19");
+    await page.locator("#focusStdinInput").type("Bob\n19");
     await page.locator("#focusRun").click();
     await check(() => page.locator("#focusOutput").text(), "stdin:Bob\n19", "contains");
-    assert.deepEqual(runRequests.at(-1).stdin, "Bob\n19");
+    assert.deepEqual(runRequests.at(-1), { code: scannerEcho, stdin: "Bob\n19" });
 
     await page.locator("#closeFocus").click();
     await check(() => page.locator("#stdinInput").value(), "Bob\n19");
+    assert.deepEqual(await page.evaluate(() => [...new Set(window.stdinEdits)]), ["stdinInput", "focusStdinInput"]);
 
     await page.reload();
     await check(() => page.locator("#stdinInput").value(), "");
@@ -162,7 +175,7 @@ suite(test => {
 
   test("standard input alone does not enable reset", async ({ page }) => {
     await check(() => page.locator("#resetProgress").enabled(), false);
-    await page.locator("#stdinInput").fill("Only runtime input");
+    await page.locator("#stdinInput").type("Only runtime input");
     await check(() => page.locator("#resetProgress").enabled(), false);
 
     await page.locator("#clearStdin").click();
@@ -225,6 +238,88 @@ suite(test => {
 
     await page.locator("#codeEditor").fill(passingHelloWorld);
     await page.locator("#runCode").click();
-    await check(() => page.locator("#consoleOutput").text(), "Smoke OK", "contains");
+    await check(() => page.locator("#consoleOutput").text(), "Hello, Java!", "contains");
+    await check(() => page.locator("#runMeta").text(), /^success\b/);
+  });
+
+  test("leaves the busy state when the fallback preview throws", async ({ page }) => {
+    page.mockRun(() => { throw new Error("Runner unavailable"); });
+    await page.locator("#codeEditor").fill(passingHelloWorld);
+    await page.evaluate((source) => {
+      const replace = String.prototype.replace;
+      String.prototype.replace = function (...args) {
+        if (String(this) === source) {
+          String.prototype.replace = replace;
+          throw new RangeError("Preview failed");
+        }
+        return replace.apply(this, args);
+      };
+    }, passingHelloWorld);
+
+    await page.locator("#runCode").click();
+    await check(() => page.locator("#runMeta").text(), /^preview-limited\b/);
+    await check(() => page.locator("#runMeta").attribute("class"), /status-warn/);
+    await page.locator("#runCode").click();
+    await check(() => page.locator("#runMeta").text(), /^learning-preview\b/);
+    await check(() => page.locator("#consoleOutput").text(), "Hello, Java!", "contains");
+  });
+
+  test("another tab can reset progress before a stale draft or submission is saved", async ({ page }) => {
+    await page.locator("#codeEditor").fill(passingHelloWorld);
+    await page.locator("#submitTask").click();
+    await check(() => page.locator("#progressText").text(), "1/104 关");
+    await page.evaluate(() => {
+      const frame = document.createElement("iframe");
+      frame.id = "resetTab";
+      frame.hidden = true;
+      frame.src = "./";
+      document.body.append(frame);
+    });
+    await check(() => page.evaluate(() => {
+      const doc = document.querySelector("#resetTab").contentDocument;
+      return doc.querySelector(".level-item.is-active") !== null &&
+        doc.querySelector("#progressText")?.textContent === "1/104 关" &&
+        doc.querySelector("#resetProgress")?.disabled === false;
+    }), true);
+
+    const didReset = await page.evaluate(draft => {
+      const editor = document.querySelector("#codeEditor");
+      editor.value = draft + "\n// pending draft";
+      editor.dispatchEvent(new Event("input", { bubbles: true }));
+      const other = document.querySelector("#resetTab").contentWindow;
+      other.confirm = () => true;
+      other.document.querySelector("#resetProgress").click();
+      const didReset = Boolean(other.localStorage.getItem("java-path-reset-v2"));
+      document.querySelector("#submitTask").click();
+      return didReset;
+    }, passingHelloWorld);
+    assert.equal(didReset, true);
+    await check(() => page.locator("#progressText").text(), "0/104 关");
+    await page.reload();
+    await check(() => page.locator("#progressText").text(), "0/104 关");
+    assert.equal(await page.evaluate(() => localStorage.getItem("java-path-drafts-v1")), null);
+  });
+
+  test("ignores a run response after switching lessons", async ({ page }) => {
+    await page.locator("#codeEditor").fill(passingHelloWorld);
+    await page.locator("#submitTask").click();
+    let release;
+    const oldRun = new Promise((resolve) => { release = resolve; });
+    page.mockRun(() => oldRun);
+    await page.locator("#runCode").click();
+    await check(() => page.locator("#runMeta").text(), "运行中");
+    await page.locator(".level-item").nth(1).click();
+    release({ status: "success", stdout: "stale result", durationMs: 20 });
+    await check(() => page.locator("#consoleOutput").text(), "Loaded: 2.", "contains");
+  });
+
+  test("lets keyboard focus leave the editor and restores focus on Escape", async ({ page }) => {
+    await page.evaluate(() => document.querySelector("#codeEditor").focus());
+    await page.press("TAB");
+    await check(() => page.evaluate(() => document.activeElement.id === "codeEditor"), false);
+    await page.locator("#focusCode").click();
+    await check(() => page.evaluate(() => document.activeElement.id), "focusEditor");
+    await page.press("ESCAPE");
+    await check(() => page.evaluate(() => document.activeElement.id), "focusCode");
   });
 });

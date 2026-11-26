@@ -1,3 +1,6 @@
+import { gradeJavaLesson } from "./submission-grading.js";
+import { runTeachingPreview } from "./teaching-preview.js";
+
 const courseGroups = window.COURSE_GROUPS || [];
 const answerCode =
   'public class Main {\n' +
@@ -61,6 +64,9 @@ const lessonArticle = document.querySelector("#lessonArticle");
 const lessonColumn = document.querySelector(".lesson-column");
 const practiceColumn = document.querySelector(".practice-column");
 const codeEditor = document.querySelector("#codeEditor");
+const editorModeLabel = document.querySelector("#editorModeLabel");
+const focusModeLabel = document.querySelector("#focusModeLabel");
+const trainingApp = document.querySelector(".training-app");
 const editorLines = document.querySelector("#editorLines");
 const stdinInput = document.querySelector("#stdinInput");
 const consoleOutput = document.querySelector("#consoleOutput");
@@ -80,17 +86,32 @@ const focusLines = document.querySelector("#focusLines");
 const focusStdinInput = document.querySelector("#focusStdinInput");
 const focusOutput = document.querySelector("#focusOutput");
 const focusRunMeta = document.querySelector("#focusRunMeta");
+const openFocusButton = document.querySelector("#focusCode");
+const closeFocusButton = document.querySelector("#closeFocus");
+const focusRunButton = document.querySelector("#focusRun");
 const nextLessonButton = document.querySelector("#nextLesson");
+const resetStorageKey = "java-path-reset-v2";
 const progressStorageKey = "java-path-progress-v1";
 const legacyProgressStorageKey = "java-master-completed";
 const draftStorageKey = "java-path-drafts-v1";
 const themeStorageKey = "java-path-theme";
 const legacyThemeStorageKey = "java-master-theme";
 const maxDraftLength = 20_000;
-let completedLessons = readStoredProgress();
+function readResetId() {
+  try {
+    return localStorage.getItem(resetStorageKey) ?? "";
+  } catch {
+    return null;
+  }
+}
+
+let progressResetId = readResetId() ?? "";
+let completedLessons = 0;
 let currentLessonIndex = 0;
 let lessonDrafts = readStoredDrafts();
-let hasLoadedLesson = false;
+const draftChanges = new Map();
+const pendingRuns = new Map();
+let focusHasRun = false;
 
 function normalizeCompletedCount(value) {
   const numeric = Number(value);
@@ -103,12 +124,13 @@ function readStoredProgress() {
     const raw = localStorage.getItem(progressStorageKey);
     if (raw) {
       const parsed = JSON.parse(raw);
+      if ((parsed.resetId ?? "") !== progressResetId) return 0;
       if (Array.isArray(parsed.completedLessonIds)) {
         const completedIds = new Set(parsed.completedLessonIds.map(String));
         const lessons = getLessonContents();
         let completedCount = 0;
 
-        while (completedCount < lessons.length && completedIds.has(lessons[completedCount].id)) {
+        while (completedCount < lessons.length && completedIds.has(lessons[completedCount]?.id)) {
           completedCount += 1;
         }
 
@@ -119,6 +141,7 @@ function readStoredProgress() {
       if (Number.isFinite(value)) return normalizeCompletedCount(value);
     }
 
+    if (progressResetId) return 0;
     const legacyValue = Number(localStorage.getItem(legacyProgressStorageKey) || 0);
     return Number.isFinite(legacyValue) ? normalizeCompletedCount(legacyValue) : 0;
   } catch {
@@ -127,7 +150,11 @@ function readStoredProgress() {
 }
 
 function readStoredTheme() {
-  return localStorage.getItem(themeStorageKey) || localStorage.getItem(legacyThemeStorageKey) || "light";
+  try {
+    return localStorage.getItem(themeStorageKey) || localStorage.getItem(legacyThemeStorageKey) || "light";
+  } catch {
+    return "light";
+  }
 }
 
 function readStoredDrafts() {
@@ -136,6 +163,7 @@ function readStoredDrafts() {
     if (!raw) return {};
 
     const parsed = JSON.parse(raw);
+    if ((parsed?.resetId ?? "") !== progressResetId) return {};
     const drafts = parsed?.drafts && typeof parsed.drafts === "object" ? parsed.drafts : {};
 
     return Object.fromEntries(
@@ -151,40 +179,44 @@ function readStoredDrafts() {
 let writeDraftsTimeout = null;
 
 function writeStoredDrafts(immediate = false) {
-  if (writeDraftsTimeout) {
-    clearTimeout(writeDraftsTimeout);
-    writeDraftsTimeout = null;
+  clearTimeout(writeDraftsTimeout);
+  writeDraftsTimeout = null;
+  if (draftChanges.size === 0 || !syncProgressReset()) return;
+
+  if (!immediate) {
+    writeDraftsTimeout = setTimeout(() => writeStoredDrafts(true), 500);
+    return;
   }
 
-  const performWrite = () => {
-    try {
-      localStorage.setItem(
-        draftStorageKey,
-        JSON.stringify({
-          drafts: lessonDrafts,
-          updatedAt: new Date().toISOString()
-        })
-      );
-    } catch {
-      // localStorage can be disabled or full. The editor must stay usable.
+  try {
+    const drafts = readStoredDrafts();
+    for (const [id, code] of draftChanges) {
+      if (code === null) delete drafts[id];
+      else drafts[id] = code;
     }
-  };
-
-  if (immediate) {
-    performWrite();
-  } else {
-    writeDraftsTimeout = setTimeout(performWrite, 500);
+    if (Object.keys(drafts).length > 0) {
+      localStorage.setItem(draftStorageKey, JSON.stringify({ drafts, resetId: progressResetId, updatedAt: new Date().toISOString() }));
+    } else {
+      localStorage.removeItem(draftStorageKey);
+    }
+    lessonDrafts = drafts;
+    draftChanges.clear();
+  } catch {
+    // Keep pending drafts in memory so editing works without persistent storage.
   }
 }
 
+const lessonContents = courseGroups.flatMap((group, groupIndex) => {
+  const authored = window["LESSON_CONTENT_LEVEL" + (groupIndex + 1)] || [];
+  return group.lessons.map((_, index) => authored[index]);
+});
+
 function getLessonContents() {
-  const contents = Array.from({ length: 13 }, (_, index) => window[`LESSON_CONTENT_LEVEL${index + 1}`] || []).flat();
-  contents[0] = { ...defaultLessonContent, ...(contents[0] || {}) };
-  return contents;
+  return lessonContents;
 }
 
 function getCurrentLesson() {
-  return getLessonContents()[currentLessonIndex] || createPlaceholderLesson(currentLessonIndex);
+  return lessonContents[currentLessonIndex] || createPlaceholderLesson(currentLessonIndex);
 }
 
 function createPlaceholderLesson(index) {
@@ -279,6 +311,12 @@ function renderLessonContent(lesson, displayIndex = currentLessonIndex) {
   const mistakes = (lesson.commonMistakes || []).length
     ? `<h3>常见错误</h3><ul>${lesson.commonMistakes.map((text) => `<li>${inlineCode(text)}</li>`).join("")}</ul>`
     : "";
+  const checks = (lesson.checks || []).map((text) => "<li>" + inlineCode(text) + "</li>").join("");
+  const taskChecks = checks ? '<details class="task-checks"><summary>本关检查项</summary><ul>' + checks + "</ul></details>" : "";
+  const runInstruction = getRunInstruction(lesson);
+  const sampleFile = lesson.sampleFile
+    ? '<details class="task-checks"><summary>' + escapeHtml(lesson.sampleFile.name) + ' 样例</summary><div class="example-box"><pre><code>' + escapeHtml(lesson.sampleFile.contents) + "</code></pre></div></details>"
+    : "";
   const sources = (lesson.sources || []).length
     ? `<div class="source-box"><strong>官方资料：</strong>${lesson.sources
         .map((source) => `<a href="${safeExternalUrl(source.url)}" target="_blank" rel="noopener noreferrer">${escapeHtml(source.title)}</a>`)
@@ -296,6 +334,9 @@ function renderLessonContent(lesson, displayIndex = currentLessonIndex) {
       <span class="task-label">任务</span>
       <p>${inlineCode(lesson.task || "")}</p>
     </div>
+    ${runInstruction ? "<p>" + inlineCode(runInstruction) + "</p>" : ""}
+    ${sampleFile}
+    ${taskChecks}
     ${mistakes}
     ${sources}
   `;
@@ -341,26 +382,19 @@ function syncAnswerDrawerBounds() {
   document.documentElement.style.setProperty("--answer-drawer-right", `${right}px`);
 }
 
-function getDraftForLesson(lesson) {
-  return typeof lessonDrafts[lesson.id] === "string" ? lessonDrafts[lesson.id] : "";
-}
+function saveCurrentDraft() {
+  if (!syncProgressReset()) return;
+  const lesson = getCurrentLesson();
+  const value = codeEditor.value.slice(0, maxDraftLength);
+  const draft = value === lesson.starterCode ? null : value;
+  const existing = Object.hasOwn(lessonDrafts, lesson.id) ? lessonDrafts[lesson.id] : null;
+  if (existing === draft) return;
 
-function setDraftForLesson(lesson, code, immediate = false) {
-  if (!lesson?.id) return;
-  const value = String(code || "").slice(0, maxDraftLength);
-
-  if (value) {
-    lessonDrafts[lesson.id] = value;
-  } else {
-    delete lessonDrafts[lesson.id];
-  }
-
-  writeStoredDrafts(immediate);
+  if (draft === null) delete lessonDrafts[lesson.id];
+  else lessonDrafts[lesson.id] = draft;
+  draftChanges.set(lesson.id, draft);
+  writeStoredDrafts();
   updateResetButtonState();
-}
-
-function saveCurrentDraft(immediate = false) {
-  setDraftForLesson(getCurrentLesson(), codeEditor.value, immediate);
 }
 
 function hasSavedDrafts() {
@@ -368,8 +402,15 @@ function hasSavedDrafts() {
 }
 
 function clearDrafts() {
+  clearTimeout(writeDraftsTimeout);
+  writeDraftsTimeout = null;
+  draftChanges.clear();
   lessonDrafts = {};
-  localStorage.removeItem(draftStorageKey);
+  try {
+    localStorage.removeItem(draftStorageKey);
+  } catch {
+    // In-memory reset remains available.
+  }
   updateResetButtonState();
 }
 
@@ -397,25 +438,30 @@ function hideNextLessonAction() {
 }
 
 function loadLesson(index) {
-  if (isLessonLocked(index)) return;
-  if (hasLoadedLesson) saveCurrentDraft(true);
+  if (isLessonLocked(index) || !syncProgressReset()) return;
+  if (focusModal.classList.contains("is-open")) closeFocusEditor();
+  writeStoredDrafts(true);
+  cancelRun(consoleOutput);
+  cancelRun(focusOutput);
 
   currentLessonIndex = index;
   const lesson = getCurrentLesson();
   renderLevels();
   renderLessonContent(lesson, index);
   renderAnswerContent(lesson);
-  const draft = getDraftForLesson(lesson);
-  codeEditor.value = draft;
+  const draft = lessonDrafts[lesson.id];
+  codeEditor.value = draft ?? lesson.starterCode ?? "";
+  const mode = getRunInstruction(lesson) ? "本地练习" : "Main.java";
+  editorModeLabel.textContent = mode;
+  focusModeLabel.textContent = mode;
   stdinInput.value = "";
   syncEditorChrome(codeEditor, editorLines);
   consoleOutput.textContent = `Loaded: ${index + 1}. ${lesson.title}`;
-  runMeta.textContent = draft ? "草稿已恢复" : "等待运行";
+  runMeta.textContent = draft !== undefined ? "草稿已恢复" : "等待运行";
   runMeta.className = "run-meta";
   setAnswerDrawer(false);
   hideNextLessonAction();
   syncAnswerDrawerBounds();
-  hasLoadedLesson = true;
 }
 
 function setProgress(nextCompletedLessons) {
@@ -437,23 +483,67 @@ function saveProgress(nextCompleted) {
   completedLessons = normalizeCompletedCount(nextCompleted);
   const completedLessonIds = getLessonContents()
     .slice(0, completedLessons)
-    .map((lesson) => lesson.id);
+    .map((lesson) => lesson?.id)
+    .filter(Boolean);
 
-  localStorage.setItem(
-    progressStorageKey,
-    JSON.stringify({
+  try {
+    localStorage.setItem(progressStorageKey, JSON.stringify({
       completedLessons,
       completedLessonIds,
+      resetId: progressResetId,
       updatedAt: new Date().toISOString()
-    })
-  );
-  localStorage.removeItem(legacyProgressStorageKey);
+    }));
+    localStorage.removeItem(legacyProgressStorageKey);
+  } catch {
+    // Progress still works in the current tab without persistent storage.
+  }
   setProgress(completedLessons);
+}
+
+function syncProgressReset() {
+  const resetId = readResetId();
+  if (resetId === null || resetId === progressResetId) return true;
+  progressResetId = resetId;
+  clearTimeout(writeDraftsTimeout);
+  draftChanges.clear();
+  lessonDrafts = readStoredDrafts();
+  completedLessons = readStoredProgress();
+  setProgress(completedLessons);
+  loadLesson(0);
+  return false;
+}
+
+function syncStoredChanges(event) {
+  if (![null, resetStorageKey, progressStorageKey, draftStorageKey].includes(event.key) ||
+      !syncProgressReset()) return;
+  if (event.key === progressStorageKey || event.key === null) {
+    completedLessons = readStoredProgress();
+    if (isLessonLocked(currentLessonIndex)) loadLesson(0);
+    setProgress(completedLessons);
+    renderLevels();
+  }
+  if (event.key === draftStorageKey || event.key === null) {
+    const oldDraft = lessonDrafts[getCurrentLesson().id];
+    lessonDrafts = readStoredDrafts();
+    const lesson = getCurrentLesson();
+    for (const [id, draft] of draftChanges) {
+      if (draft === null) delete lessonDrafts[id];
+      else lessonDrafts[id] = draft;
+    }
+    if (!draftChanges.has(lesson.id) && oldDraft !== lessonDrafts[lesson.id]) {
+      codeEditor.value = lessonDrafts[lesson.id] ?? lesson.starterCode ?? "";
+      focusEditor.value = codeEditor.value;
+      syncEditorChrome(codeEditor, editorLines);
+      syncEditorChrome(focusEditor, focusLines);
+    }
+    updateResetButtonState();
+  }
 }
 
 function setAnswerDrawer(open) {
   if (open) syncAnswerDrawerBounds();
   answerDrawer.classList.toggle("is-open", open);
+  answerDrawer.inert = !open;
   answerDrawer.setAttribute("aria-hidden", open ? "false" : "true");
   showAnswer.classList.toggle("is-active", open);
   showAnswer.setAttribute("aria-pressed", open ? "true" : "false");
@@ -463,9 +553,15 @@ function setAnswerDrawer(open) {
 }
 
 function setTheme(theme) {
+  theme = theme === "dark" ? "dark" : "light";
   document.documentElement.dataset.theme = theme;
-  localStorage.setItem(themeStorageKey, theme);
-  localStorage.removeItem(legacyThemeStorageKey);
+  try {
+    localStorage.setItem(themeStorageKey, theme);
+    localStorage.removeItem(legacyThemeStorageKey);
+  } catch {
+    // The current tab still supports both themes.
+  }
+  themeToggle.setAttribute("aria-pressed", String(theme === "dark"));
   themeToggle.innerHTML = `<span class="button-glyph">${theme === "dark" ? "☀" : "☾"}</span>`;
 }
 
@@ -475,38 +571,6 @@ function replaceSelection(textarea, value) {
   textarea.value = `${textarea.value.slice(0, start)}${value}${textarea.value.slice(end)}`;
   textarea.selectionStart = start + value.length;
   textarea.selectionEnd = start + value.length;
-  textarea.dispatchEvent(new Event("input", { bubbles: true }));
-}
-
-function outdentSelection(textarea) {
-  const start = textarea.selectionStart;
-  const end = textarea.selectionEnd;
-  const value = textarea.value;
-  const lineStart = value.lastIndexOf("\n", start - 1) + 1;
-  const selected = value.slice(lineStart, end);
-  const outdented = selected.replace(/^( {1,4}|\t)/gm, "");
-  textarea.value = `${value.slice(0, lineStart)}${outdented}${value.slice(end)}`;
-  textarea.selectionStart = lineStart;
-  textarea.selectionEnd = lineStart + outdented.length;
-  textarea.dispatchEvent(new Event("input", { bubbles: true }));
-}
-
-function indentSelection(textarea) {
-  const start = textarea.selectionStart;
-  const end = textarea.selectionEnd;
-
-  if (start === end) {
-    replaceSelection(textarea, "    ");
-    return;
-  }
-
-  const value = textarea.value;
-  const lineStart = value.lastIndexOf("\n", start - 1) + 1;
-  const selected = value.slice(lineStart, end);
-  const indented = selected.replace(/^/gm, "    ");
-  textarea.value = `${value.slice(0, lineStart)}${indented}${value.slice(end)}`;
-  textarea.selectionStart = lineStart;
-  textarea.selectionEnd = lineStart + indented.length;
   textarea.dispatchEvent(new Event("input", { bubbles: true }));
 }
 
@@ -522,15 +586,7 @@ function autoIndentLine(textarea) {
 
 function bindEditorShortcuts(textarea, runAction) {
   textarea.addEventListener("keydown", (event) => {
-    if (event.key === "Tab") {
-      event.preventDefault();
-      if (event.shiftKey) {
-        outdentSelection(textarea);
-      } else {
-        indentSelection(textarea);
-      }
-      return;
-    }
+    if (event.isComposing || event.keyCode === 229) return;
 
     if ((event.ctrlKey || event.metaKey) && event.key === "Enter") {
       event.preventDefault();
@@ -551,118 +607,20 @@ function bindEditorChrome(textarea, lineNode) {
   textarea.addEventListener("scroll", () => syncLineScroll(textarea, lineNode));
 }
 
-function decodeJavaString(value) {
-  return value
-    .replaceAll('\\"', '"')
-    .replaceAll("\\n", "\n")
-    .replaceAll("\\t", "\t")
-    .replaceAll("\\r", "\r")
-    .replaceAll("\\\\", "\\");
+function getRunInstruction(lesson) {
+  if (lesson.runInstruction) return lesson.runInstruction;
+  if (!/\bpublic\s+class\s+Main\b/.test(lesson.answerCode || "")) {
+    return "请在本地项目或终端使用本关对应工具运行。这里可以提交片段并检查是否满足任务要求。";
+  }
+  return "";
 }
 
-function splitJavaConcat(expression) {
-  const parts = [];
-  let current = "";
-  let inString = false;
-  let escaping = false;
-
-  for (const char of expression) {
-    if (escaping) {
-      current += char;
-      escaping = false;
-      continue;
-    }
-
-    if (char === "\\") {
-      current += char;
-      escaping = true;
-      continue;
-    }
-
-    if (char === '"') {
-      current += char;
-      inString = !inString;
-      continue;
-    }
-
-    if (char === "+" && !inString) {
-      parts.push(current.trim());
-      current = "";
-      continue;
-    }
-
-    current += char;
+function cancelRun(outputNode) {
+  const pending = pendingRuns.get(outputNode);
+  if (pending) {
+    pending.abort();
+    pendingRuns.delete(outputNode);
   }
-
-  parts.push(current.trim());
-  return parts;
-}
-
-function buildPreviewVariables(code) {
-  const variables = new Map();
-  const assignmentPattern = /\b(?:String|int|long|double|float|boolean|char)\s+([A-Za-z_$][\w$]*)\s*=\s*([^;]+);/g;
-  let match;
-
-  while ((match = assignmentPattern.exec(code)) !== null) {
-    const [, name, rawValue] = match;
-    const value = rawValue.trim();
-
-    if (/^"(?:\\.|[^"\\])*"$/.test(value)) {
-      variables.set(name, decodeJavaString(value.slice(1, -1)));
-    } else if (/^'(?:\\.|[^'\\])'$/.test(value)) {
-      variables.set(name, decodeJavaString(value.slice(1, -1)));
-    } else if (/^(true|false)$/.test(value)) {
-      variables.set(name, value);
-    } else if (/^-?\d+(?:\.\d+)?[dDfFlL]?$/.test(value)) {
-      variables.set(name, value.replace(/[dDfFlL]$/, ""));
-    }
-  }
-
-  return variables;
-}
-
-function evaluatePreviewExpression(expression, variables) {
-  const output = [];
-
-  for (const part of splitJavaConcat(expression)) {
-    if (!part) continue;
-
-    if (/^"(?:\\.|[^"\\])*"$/.test(part)) {
-      output.push(decodeJavaString(part.slice(1, -1)));
-    } else if (/^'(?:\\.|[^'\\])'$/.test(part)) {
-      output.push(decodeJavaString(part.slice(1, -1)));
-    } else if (variables.has(part)) {
-      output.push(variables.get(part));
-    } else if (/^-?\d+(?:\.\d+)?[dDfFlL]?$/.test(part) || /^(true|false)$/.test(part)) {
-      output.push(part.replace(/[dDfFlL]$/, ""));
-    } else {
-      return null;
-    }
-  }
-
-  return output.join("");
-}
-
-function runBrowserPreview(code) {
-  const variables = buildPreviewVariables(code);
-  const printPattern = /\b(?:System\.out\.println|IO\.println)\s*\(([\s\S]*?)\)\s*;/g;
-  const outputLines = [];
-  let match;
-
-  while ((match = printPattern.exec(code)) !== null) {
-    const output = evaluatePreviewExpression(match[1], variables);
-    if (output !== null) outputLines.push(output);
-  }
-
-  return {
-    status: outputLines.length > 0 ? "static-preview" : "static-preview-limited",
-    stdout: outputLines.join("\n"),
-    stderr:
-      outputLines.length > 0
-        ? "Static preview: cloud JDK unavailable."
-        : 'Static preview: supports basic System.out.println("text").',
-    durationMs: 0
-  };
 }
 
 function renderRunResult(result, outputNode, metaNode) {
@@ -675,115 +633,81 @@ function renderRunResult(result, outputNode, metaNode) {
       ? `${metaNode === runMeta ? "run-meta " : ""}status-success`
       : result.status === "learning-preview" ||
           result.status === "preview-limited" ||
-          result.status === "static-preview" ||
-          result.status === "static-preview-limited"
+          result.status === "local-exercise"
         ? `${metaNode === runMeta ? "run-meta " : ""}status-warn`
         : `${metaNode === runMeta ? "run-meta " : ""}status-error`;
 }
 
 async function runCode(sourceEditor = codeEditor, outputNode = consoleOutput, metaNode = runMeta, inputNode = stdinInput) {
+  if (!syncProgressReset()) return;
+  cancelRun(outputNode);
+  const runInstruction = getRunInstruction(getCurrentLesson());
+  if (runInstruction) {
+    renderRunResult({ status: "local-exercise", stderr: runInstruction }, outputNode, metaNode);
+    return;
+  }
+
+  const code = sourceEditor.value;
+  const stdin = inputNode.value;
   outputNode.textContent = "正在运行 Java 代码...";
   metaNode.textContent = "运行中";
   metaNode.className = metaNode === runMeta ? "run-meta" : "";
 
-  const hasBackendRunner = ["localhost", "127.0.0.1"].includes(window.location.hostname);
-  if (!hasBackendRunner) {
-    renderRunResult(runBrowserPreview(sourceEditor.value), outputNode, metaNode);
+  if (!["localhost", "127.0.0.1"].includes(window.location.hostname)) {
+    renderRunResult(runTeachingPreview(code), outputNode, metaNode);
     return;
   }
 
+  const controller = new AbortController();
+  pendingRuns.set(outputNode, controller);
+  const timeout = setTimeout(() => controller.abort(), 20_000);
+  let result;
   try {
     const response = await fetch("api/run", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ code: sourceEditor.value, stdin: inputNode.value })
+      body: JSON.stringify({ code, stdin }),
+      signal: controller.signal
     });
+    result = await response.json();
+    if (!result || typeof result.status !== "string") throw new Error("未收到有效的运行结果。");
+  } catch {
+    if (pendingRuns.get(outputNode) !== controller) return;
+    if (controller.signal.aborted) {
+      result = { status: "timeout", stderr: "本地运行请求超时，请稍后重试。" };
+    } else {
+      try {
+        result = runTeachingPreview(code);
+      } catch {
+        result = { status: "run-error", stderr: "无法连接本地 JDK，教学预览也未能完成。" };
+      }
+    }
+  } finally {
+    clearTimeout(timeout);
+  }
 
-    if (!response.ok) {
-      renderRunResult(runBrowserPreview(sourceEditor.value), outputNode, metaNode);
+  if (pendingRuns.get(outputNode) === controller) {
+    pendingRuns.delete(outputNode);
+    if (sourceEditor.value !== code) {
+      outputNode.textContent = "代码已修改，请重新运行。";
+      metaNode.textContent = "等待运行";
+      metaNode.className = metaNode === runMeta ? "run-meta" : "";
       return;
     }
-
-    const result = await response.json();
     renderRunResult(result, outputNode, metaNode);
-  } catch (error) {
-    renderRunResult(runBrowserPreview(sourceEditor.value), outputNode, metaNode);
   }
-}
-
-function validateSubmission(lesson, code) {
-  const source = code.trim();
-  const reference = `${lesson.title}\n${lesson.subtitle}\n${lesson.task}\n${lesson.answerCode || ""}`;
-
-  if (!source) {
-    return {
-      ok: false,
-      message: "No code submitted."
-    };
-  }
-
-  if (source.length < 20) {
-    return {
-      ok: false,
-      message: "Submission is too short."
-    };
-  }
-
-  if (currentLessonIndex === 0) {
-    const hasPrint = /\b(?:System\.out\.println|IO\.println)\s*\(/.test(source);
-    const hasPrintableExpression = /(?:System\.out\.println|IO\.println)\s*\(\s*[^)]{1,200}\s*\)\s*;/.test(source);
-    return hasPrint && hasPrintableExpression
-      ? { ok: true }
-      : {
-          ok: false,
-          message: "Expected a complete print statement."
-        };
-  }
-
-  if (/\b(SELECT|INSERT|UPDATE|DELETE|CREATE\s+TABLE|ALTER\s+TABLE|DROP\s+TABLE|FROM|WHERE|JOIN)\b/i.test(reference)) {
-    return /\b(SELECT|INSERT|UPDATE|DELETE|CREATE|ALTER|DROP|FROM|WHERE|JOIN)\b/i.test(source)
-      ? { ok: true }
-      : { ok: false, message: "Expected SQL statement." };
-  }
-
-  if (/\b(git|docker|curl|mvn|gradle|systemctl|java -jar|FROM\s+.+|name:\s+)/i.test(reference)) {
-    const toolKeywords = ["git", "docker", "curl", "mvn", "gradle", "systemctl", "java -jar", "FROM", "jobs:", "steps:"];
-    const hasToolKeyword = toolKeywords.some((keyword) => source.toLowerCase().includes(keyword.toLowerCase()));
-    return hasToolKeyword
-      ? { ok: true }
-      : { ok: false, message: "Expected command or config snippet." };
-  }
-
-  if (/(@(RestController|Controller|Service|Repository|SpringBootApplication|GetMapping|PostMapping)|Spring Boot|Controller|Service 分层|权限控制|文件上传)/.test(reference)) {
-    return /(@\w+|\b(class|interface|record)\s+\w+)/.test(source)
-      ? { ok: true }
-      : { ok: false, message: "Expected Spring class or annotation." };
-  }
-
-  if (/\b(public\s+)?class\s+Main\b/.test(reference) || /\bmain\s*\(/.test(reference)) {
-    const hasMainClass = /\bclass\s+Main\b/.test(source);
-    const needsMainMethod = /\bmain\s*\(/.test(reference);
-    const hasMainMethod = /\bpublic\s+static\s+void\s+main\s*\(\s*String\s*(?:\[\]\s*\w+|\w+\s*\[\])/.test(source);
-
-    if (!hasMainClass) {
-      return { ok: false, message: "Expected class Main." };
-    }
-    if (needsMainMethod && !hasMainMethod) {
-      return { ok: false, message: "Expected public static void main." };
-    }
-  }
-
-  return { ok: true };
 }
 
 function submitTask() {
-  saveCurrentDraft(true);
+  if (!syncProgressReset()) return;
+  cancelRun(consoleOutput);
+  writeStoredDrafts(true);
   const lesson = getCurrentLesson();
-  const validation = validateSubmission(lesson, codeEditor.value);
+  const validation = gradeJavaLesson(lesson, codeEditor.value);
 
   if (validation.ok) {
-    const previousCompleted = completedLessons;
-    const nextCompleted = Math.max(completedLessons, currentLessonIndex + 1);
+    const previousCompleted = Math.max(completedLessons, readStoredProgress());
+    const nextCompleted = Math.max(previousCompleted, currentLessonIndex + 1);
     const nextLesson = getLessonContents()[nextCompleted];
     const didUnlock = nextCompleted > previousCompleted;
 
@@ -810,6 +734,45 @@ function submitTask() {
   hideNextLessonAction();
 }
 
+function openFocusEditor() {
+  writeStoredDrafts(true);
+  focusEditor.value = codeEditor.value;
+  focusStdinInput.value = stdinInput.value;
+  syncEditorChrome(focusEditor, focusLines);
+  focusOutput.textContent = consoleOutput.textContent;
+  focusRunMeta.textContent = runMeta.textContent;
+  focusRunMeta.className = runMeta.className.replace("run-meta", "").trim();
+  focusHasRun = false;
+  setAnswerDrawer(false);
+  trainingApp.inert = true;
+  focusModal.classList.add("is-open");
+  focusModal.setAttribute("aria-hidden", "false");
+  focusEditor.focus();
+}
+
+function closeFocusEditor() {
+  const wasRunning = pendingRuns.has(focusOutput);
+  cancelRun(focusOutput);
+  stdinInput.value = focusStdinInput.value;
+  writeStoredDrafts(true);
+  if (focusHasRun && !wasRunning) {
+    cancelRun(consoleOutput);
+    consoleOutput.textContent = focusOutput.textContent;
+    runMeta.textContent = focusRunMeta.textContent;
+    runMeta.className = ("run-meta " + focusRunMeta.className).trim();
+  }
+  focusModal.classList.remove("is-open");
+  focusModal.setAttribute("aria-hidden", "true");
+  trainingApp.inert = false;
+  openFocusButton.focus();
+}
+
+function runFocusCode() {
+  focusHasRun = true;
+  writeStoredDrafts(true);
+  runCode(focusEditor, focusOutput, focusRunMeta, focusStdinInput);
+}
+
 function bindEvents() {
   levelList.addEventListener("click", (event) => {
     const item = event.target.closest(".level-item");
@@ -820,63 +783,50 @@ function bindEvents() {
   });
   document.querySelector("#runCode").addEventListener("click", () => runCode());
   codeEditor.addEventListener("input", saveCurrentDraft);
-  document.querySelector("#focusCode").addEventListener("click", () => {
-    saveCurrentDraft(true);
-    focusEditor.value = codeEditor.value;
-    focusStdinInput.value = stdinInput.value;
-    syncEditorChrome(focusEditor, focusLines);
-    focusOutput.textContent = consoleOutput.textContent || "";
-    focusRunMeta.textContent = runMeta.textContent || "等待运行";
-    focusRunMeta.className = runMeta.className.replace("run-meta", "").trim();
-    focusModal.classList.add("is-open");
-    focusModal.setAttribute("aria-hidden", "false");
-    focusEditor.focus();
-  });
-  document.querySelector("#closeFocus").addEventListener("click", () => {
+  focusEditor.addEventListener("input", () => {
     codeEditor.value = focusEditor.value;
-    stdinInput.value = focusStdinInput.value;
     syncEditorChrome(codeEditor, editorLines);
-    saveCurrentDraft(true);
-    consoleOutput.textContent = focusOutput.textContent;
-    runMeta.textContent = focusRunMeta.textContent;
-    runMeta.className = `run-meta ${focusRunMeta.className || ""}`.trim();
-    focusModal.classList.remove("is-open");
-    focusModal.setAttribute("aria-hidden", "true");
+    saveCurrentDraft();
   });
-  document.querySelector("#focusRun").addEventListener("click", () => {
-    codeEditor.value = focusEditor.value;
-    stdinInput.value = focusStdinInput.value;
-    syncEditorChrome(codeEditor, editorLines);
-    saveCurrentDraft(true);
-    runCode(focusEditor, focusOutput, focusRunMeta, focusStdinInput);
-  });
+  openFocusButton.addEventListener("click", openFocusEditor);
+  closeFocusButton.addEventListener("click", closeFocusEditor);
+  focusRunButton.addEventListener("click", runFocusCode);
   bindEditorShortcuts(codeEditor, () => runCode());
-  bindEditorShortcuts(focusEditor, () => {
-    codeEditor.value = focusEditor.value;
-    stdinInput.value = focusStdinInput.value;
-    syncEditorChrome(codeEditor, editorLines);
-    saveCurrentDraft(true);
-    runCode(focusEditor, focusOutput, focusRunMeta, focusStdinInput);
-  });
+  bindEditorShortcuts(focusEditor, runFocusCode);
   bindEditorChrome(codeEditor, editorLines);
   bindEditorChrome(focusEditor, focusLines);
   focusModal.addEventListener("click", (event) => {
-    if (event.target === focusModal) {
-      document.querySelector("#closeFocus").click();
-    }
+    if (event.target === focusModal) closeFocusEditor();
   });
-  document.addEventListener("keydown", (event) => {
-    if (event.key === "Escape" && focusModal.classList.contains("is-open")) {
-      document.querySelector("#closeFocus").click();
+  focusModal.addEventListener("keydown", (event) => {
+    if (event.isComposing) return;
+    if (event.key === "Escape") {
+      event.preventDefault();
+      closeFocusEditor();
+    }
+    if (event.key === "Tab" && event.shiftKey && event.target === focusRunButton) {
+      event.preventDefault();
+      focusStdinInput.focus();
+    }
+    if (event.key === "Tab" && !event.shiftKey && event.target === focusStdinInput) {
+      event.preventDefault();
+      focusRunButton.focus();
     }
   });
   showAnswer.addEventListener("click", () => {
-    setAnswerDrawer(!answerDrawer.classList.contains("is-open"));
+    const open = !answerDrawer.classList.contains("is-open");
+    setAnswerDrawer(open);
+    if (open) closeAnswer.focus();
   });
   closeAnswer.addEventListener("click", () => {
     setAnswerDrawer(false);
+    showAnswer.focus();
+  });
+  answerDrawer.addEventListener("keydown", (event) => {
+    if (event.key === "Escape") closeAnswer.click();
   });
   document.querySelector("#clearConsole").addEventListener("click", () => {
+    cancelRun(consoleOutput);
     consoleOutput.textContent = "";
     runMeta.textContent = "已清空";
     runMeta.className = "run-meta";
@@ -894,11 +844,14 @@ function bindEvents() {
   resetProgress.addEventListener("click", () => {
     if ((completedLessons > 0 || hasSavedDrafts()) && !window.confirm("确认重置学习进度？")) return;
 
-    localStorage.removeItem(progressStorageKey);
-    localStorage.removeItem(legacyProgressStorageKey);
+    progressResetId = crypto.randomUUID?.() ?? String(Date.now());
+    try {
+      localStorage.setItem(resetStorageKey, progressResetId);
+    } catch {
+      // The current tab can still reset its progress.
+    }
     clearDrafts();
     saveProgress(0);
-    hasLoadedLesson = false;
     loadLesson(0);
     consoleOutput.textContent = `Progress reset.\nLoaded: 1. ${getCurrentLesson().title}`;
     runMeta.textContent = "已重置";
@@ -910,10 +863,12 @@ function bindEvents() {
     syncAnswerDrawerBounds();
   });
   window.addEventListener("resize", syncAnswerDrawerBounds);
+  window.addEventListener("storage", syncStoredChanges);
+  window.addEventListener("pagehide", () => writeStoredDrafts(true));
 }
 
 function boot() {
-  completedLessons = normalizeCompletedCount(completedLessons);
+  completedLessons = readStoredProgress();
   setProgress(completedLessons);
   setTheme(readStoredTheme());
   loadLesson(0);

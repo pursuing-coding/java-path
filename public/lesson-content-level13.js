@@ -1,6 +1,7 @@
 window.LESSON_CONTENT_LEVEL13 = [
   {
     id: "level13-1-cli-accounting-book",
+    runInstruction: "把代码保存为 Main.java，在同一个本地目录运行 java Main.java。先新增账目并输入 0 保存，再重新启动程序验证旧账目能读回。",
     title: "命令行记账本",
     subtitle: "变量、集合、文件",
     intro: [
@@ -536,6 +537,11 @@ public class Main {
   },
   {
     id: "level13-3-contacts-csv-tool",
+    runInstruction: "请在本地目录保存 Main.java 和 data/contacts-raw.csv，再执行 java Main.java，检查终端输出及 data/contacts-clean.csv。",
+    sampleFile: {
+      name: "data/contacts-raw.csv",
+      contents: "name,phone,email,city,tag\n 小林 ,138-1234-5678,LIN@example.com, 杭州 ,同学\nAda,13912345678,ada@example.com,北京,朋友\n小林,13812345678,lin@example.com,杭州,朋友\n无效联系人,123,bad,杭州,"
+    },
     title: "通讯录与 CSV 工具",
     subtitle: "文件和数据清洗",
     intro: [
