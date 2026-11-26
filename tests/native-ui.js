@@ -275,19 +275,25 @@ suite(test => {
       frame.src = "./";
       document.body.append(frame);
     });
-    await check(() => page.evaluate(() =>
-      document.querySelector("#resetTab").contentDocument.querySelector("#resetProgress")?.disabled === false
-    ), true);
+    await check(() => page.evaluate(() => {
+      const doc = document.querySelector("#resetTab").contentDocument;
+      return doc.querySelector(".level-item.is-active") !== null &&
+        doc.querySelector("#progressText")?.textContent === "1/104 关" &&
+        doc.querySelector("#resetProgress")?.disabled === false;
+    }), true);
 
-    await page.evaluate(draft => {
+    const didReset = await page.evaluate(draft => {
       const editor = document.querySelector("#codeEditor");
       editor.value = draft + "\n// pending draft";
       editor.dispatchEvent(new Event("input", { bubbles: true }));
       const other = document.querySelector("#resetTab").contentWindow;
       other.confirm = () => true;
       other.document.querySelector("#resetProgress").click();
+      const didReset = Boolean(other.localStorage.getItem("java-path-reset-v2"));
       document.querySelector("#submitTask").click();
+      return didReset;
     }, passingHelloWorld);
+    assert.equal(didReset, true);
     await check(() => page.locator("#progressText").text(), "0/104 关");
     await page.reload();
     await check(() => page.locator("#progressText").text(), "0/104 关");
