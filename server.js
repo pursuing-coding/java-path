@@ -293,6 +293,20 @@ async function serveStatic(requestUrl, response) {
   }
 }
 
+function acceptsLocalRun(request) {
+  const hosts = request.headersDistinct.host;
+  if (hosts?.length !== 1) return false;
+  const authority = hosts[0].toLowerCase();
+  const port = request.socket.localPort;
+  const localHosts = ["localhost", "127.0.0.1"];
+  if (!localHosts.some(name => authority === `${name}:${port}` || (port === 80 && authority === name))) {
+    return false;
+  }
+  const origins = request.headersDistinct.origin;
+  const expectedOrigin = "http://" + authority.replace(/:80$/, "");
+  return !origins || (origins.length === 1 && origins[0] === expectedOrigin);
+}
+
 const server = createServer(async (request, response) => {
   try {
     const requestUrl = new URL(request.url, "http://127.0.0.1");
@@ -301,8 +315,7 @@ const server = createServer(async (request, response) => {
       return;
     }
     if (request.method === "POST" && requestUrl.pathname === "/api/run") {
-      const host = request.headers.host || "";
-      if (!/^(?:127\.0\.0\.1|localhost)(?::\d+)?$/i.test(host)) {
+      if (!acceptsLocalRun(request)) {
         sendJson(response, 403, { status: "error", stderr: "Java 运行服务仅接受本机地址。" });
         return;
       }

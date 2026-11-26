@@ -90,12 +90,22 @@ const openFocusButton = document.querySelector("#focusCode");
 const closeFocusButton = document.querySelector("#closeFocus");
 const focusRunButton = document.querySelector("#focusRun");
 const nextLessonButton = document.querySelector("#nextLesson");
+const resetStorageKey = "java-path-reset-v2";
 const progressStorageKey = "java-path-progress-v1";
 const legacyProgressStorageKey = "java-master-completed";
 const draftStorageKey = "java-path-drafts-v1";
 const themeStorageKey = "java-path-theme";
 const legacyThemeStorageKey = "java-master-theme";
 const maxDraftLength = 20_000;
+function readResetId() {
+  try {
+    return localStorage.getItem(resetStorageKey) ?? "";
+  } catch {
+    return null;
+  }
+}
+
+let progressResetId = readResetId() ?? "";
 let completedLessons = 0;
 let currentLessonIndex = 0;
 let lessonDrafts = readStoredDrafts();
@@ -114,6 +124,7 @@ function readStoredProgress() {
     const raw = localStorage.getItem(progressStorageKey);
     if (raw) {
       const parsed = JSON.parse(raw);
+      if ((parsed.resetId ?? "") !== progressResetId) return 0;
       if (Array.isArray(parsed.completedLessonIds)) {
         const completedIds = new Set(parsed.completedLessonIds.map(String));
         const lessons = getLessonContents();
@@ -130,6 +141,7 @@ function readStoredProgress() {
       if (Number.isFinite(value)) return normalizeCompletedCount(value);
     }
 
+    if (progressResetId) return 0;
     const legacyValue = Number(localStorage.getItem(legacyProgressStorageKey) || 0);
     return Number.isFinite(legacyValue) ? normalizeCompletedCount(legacyValue) : 0;
   } catch {
@@ -151,6 +163,7 @@ function readStoredDrafts() {
     if (!raw) return {};
 
     const parsed = JSON.parse(raw);
+    if ((parsed?.resetId ?? "") !== progressResetId) return {};
     const drafts = parsed?.drafts && typeof parsed.drafts === "object" ? parsed.drafts : {};
 
     return Object.fromEntries(
@@ -168,7 +181,7 @@ let writeDraftsTimeout = null;
 function writeStoredDrafts(immediate = false) {
   clearTimeout(writeDraftsTimeout);
   writeDraftsTimeout = null;
-  if (draftChanges.size === 0) return;
+  if (draftChanges.size === 0 || !syncProgressReset()) return;
 
   if (!immediate) {
     writeDraftsTimeout = setTimeout(() => writeStoredDrafts(true), 500);
@@ -182,7 +195,7 @@ function writeStoredDrafts(immediate = false) {
       else drafts[id] = code;
     }
     if (Object.keys(drafts).length > 0) {
-      localStorage.setItem(draftStorageKey, JSON.stringify({ drafts, updatedAt: new Date().toISOString() }));
+      localStorage.setItem(draftStorageKey, JSON.stringify({ drafts, resetId: progressResetId, updatedAt: new Date().toISOString() }));
     } else {
       localStorage.removeItem(draftStorageKey);
     }
@@ -370,6 +383,7 @@ function syncAnswerDrawerBounds() {
 }
 
 function saveCurrentDraft() {
+  if (!syncProgressReset()) return;
   const lesson = getCurrentLesson();
   const value = codeEditor.value.slice(0, maxDraftLength);
   const draft = value === lesson.starterCode ? null : value;
@@ -424,7 +438,7 @@ function hideNextLessonAction() {
 }
 
 function loadLesson(index) {
-  if (isLessonLocked(index)) return;
+  if (isLessonLocked(index) || !syncProgressReset()) return;
   if (focusModal.classList.contains("is-open")) closeFocusEditor();
   writeStoredDrafts(true);
   cancelRun(consoleOutput);
@@ -476,6 +490,7 @@ function saveProgress(nextCompleted) {
     localStorage.setItem(progressStorageKey, JSON.stringify({
       completedLessons,
       completedLessonIds,
+      resetId: progressResetId,
       updatedAt: new Date().toISOString()
     }));
     localStorage.removeItem(legacyProgressStorageKey);
@@ -485,20 +500,25 @@ function saveProgress(nextCompleted) {
   setProgress(completedLessons);
 }
 
+function syncProgressReset() {
+  const resetId = readResetId();
+  if (resetId === null || resetId === progressResetId) return true;
+  progressResetId = resetId;
+  clearTimeout(writeDraftsTimeout);
+  draftChanges.clear();
+  lessonDrafts = readStoredDrafts();
+  completedLessons = readStoredProgress();
+  setProgress(completedLessons);
+  loadLesson(0);
+  return false;
+}
+
 function syncStoredChanges(event) {
+  if (![null, resetStorageKey, progressStorageKey, draftStorageKey].includes(event.key) ||
+      !syncProgressReset()) return;
   if (event.key === progressStorageKey || event.key === null) {
-    const previousCount = completedLessons;
     completedLessons = readStoredProgress();
-    if (completedLessons === 0) {
-      draftChanges.clear();
-      lessonDrafts = readStoredDrafts();
-      setProgress(0);
-      loadLesson(0);
-      return;
-    }
-    if (completedLessons < previousCount) {
-      saveProgress(previousCount);
-    }
+    if (isLessonLocked(currentLessonIndex)) loadLesson(0);
     setProgress(completedLessons);
     renderLevels();
   }
@@ -619,6 +639,7 @@ function renderRunResult(result, outputNode, metaNode) {
 }
 
 async function runCode(sourceEditor = codeEditor, outputNode = consoleOutput, metaNode = runMeta, inputNode = stdinInput) {
+  if (!syncProgressReset()) return;
   cancelRun(outputNode);
   const runInstruction = getRunInstruction(getCurrentLesson());
   if (runInstruction) {
@@ -639,6 +660,7 @@ async function runCode(sourceEditor = codeEditor, outputNode = consoleOutput, me
 
   const controller = new AbortController();
   pendingRuns.set(outputNode, controller);
+  const timeout = setTimeout(() => controller.abort(), 20_000);
   let result;
   try {
     const response = await fetch("api/run", {
@@ -650,17 +672,34 @@ async function runCode(sourceEditor = codeEditor, outputNode = consoleOutput, me
     result = await response.json();
     if (!result || typeof result.status !== "string") throw new Error("未收到有效的运行结果。");
   } catch {
-    if (controller.signal.aborted) return;
-    result = runTeachingPreview(code);
+    if (pendingRuns.get(outputNode) !== controller) return;
+    if (controller.signal.aborted) {
+      result = { status: "timeout", stderr: "本地运行请求超时，请稍后重试。" };
+    } else {
+      try {
+        result = runTeachingPreview(code);
+      } catch {
+        result = { status: "run-error", stderr: "无法连接本地 JDK，教学预览也未能完成。" };
+      }
+    }
+  } finally {
+    clearTimeout(timeout);
   }
 
   if (pendingRuns.get(outputNode) === controller) {
     pendingRuns.delete(outputNode);
+    if (sourceEditor.value !== code) {
+      outputNode.textContent = "代码已修改，请重新运行。";
+      metaNode.textContent = "等待运行";
+      metaNode.className = metaNode === runMeta ? "run-meta" : "";
+      return;
+    }
     renderRunResult(result, outputNode, metaNode);
   }
 }
 
 function submitTask() {
+  if (!syncProgressReset()) return;
   cancelRun(consoleOutput);
   writeStoredDrafts(true);
   const lesson = getCurrentLesson();
@@ -805,6 +844,12 @@ function bindEvents() {
   resetProgress.addEventListener("click", () => {
     if ((completedLessons > 0 || hasSavedDrafts()) && !window.confirm("确认重置学习进度？")) return;
 
+    progressResetId = crypto.randomUUID?.() ?? String(Date.now());
+    try {
+      localStorage.setItem(resetStorageKey, progressResetId);
+    } catch {
+      // The current tab can still reset its progress.
+    }
     clearDrafts();
     saveProgress(0);
     loadLesson(0);

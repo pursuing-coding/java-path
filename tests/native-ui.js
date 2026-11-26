@@ -264,6 +264,36 @@ suite(test => {
     await check(() => page.locator("#consoleOutput").text(), "Hello, Java!", "contains");
   });
 
+  test("another tab can reset progress before a stale draft or submission is saved", async ({ page }) => {
+    await page.locator("#codeEditor").fill(passingHelloWorld);
+    await page.locator("#submitTask").click();
+    await check(() => page.locator("#progressText").text(), "1/104 关");
+    await page.evaluate(() => {
+      const frame = document.createElement("iframe");
+      frame.id = "resetTab";
+      frame.hidden = true;
+      frame.src = "./";
+      document.body.append(frame);
+    });
+    await check(() => page.evaluate(() =>
+      document.querySelector("#resetTab").contentDocument.querySelector("#resetProgress")?.disabled === false
+    ), true);
+
+    await page.evaluate(draft => {
+      const editor = document.querySelector("#codeEditor");
+      editor.value = draft + "\n// pending draft";
+      editor.dispatchEvent(new Event("input", { bubbles: true }));
+      const other = document.querySelector("#resetTab").contentWindow;
+      other.confirm = () => true;
+      other.document.querySelector("#resetProgress").click();
+      document.querySelector("#submitTask").click();
+    }, passingHelloWorld);
+    await check(() => page.locator("#progressText").text(), "0/104 关");
+    await page.reload();
+    await check(() => page.locator("#progressText").text(), "0/104 关");
+    assert.equal(await page.evaluate(() => localStorage.getItem("java-path-drafts-v1")), null);
+  });
+
   test("ignores a run response after switching lessons", async ({ page }) => {
     await page.locator("#codeEditor").fill(passingHelloWorld);
     await page.locator("#submitTask").click();
